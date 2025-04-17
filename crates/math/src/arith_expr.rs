@@ -43,7 +43,7 @@ impl<F: Field> Dual<F> {
             1 => Ok(self),
             _ => {
                 // base must be constant to stay linear
-                if self.derivs.iter().all(|&d| d == F::ZERO) {
+                if self.derivs_constant() {
                     Ok(Self {
                         real:   self.real.pow(exp as u64),
                         derivs: vec![F::ZERO; self.derivs.len()],
@@ -55,11 +55,15 @@ impl<F: Field> Dual<F> {
         }
     }
 
+	pub fn derivs_constant(&self) -> bool {
+		self.derivs.iter().all(|&d| d == F::ZERO)
+	}
+
     /// multiply, error if both sides carry a derivative
     pub fn checked_mul(self, rhs: Self) -> Result<Self, Error> {
         let n = self.derivs.len();
-        let left_const  = self.derivs.iter().all(|&d| d == F::ZERO);
-        let right_const = rhs.derivs.iter().all(|&d| d == F::ZERO);
+        let left_const  = self.derivs_constant();
+        let right_const = rhs.derivs_constant();
 
         let real = self.real * rhs.real;
         let derivs = match (left_const, right_const) {
@@ -377,36 +381,39 @@ impl<F: Field> ArithExpr<F> {
 			return Err(Error::NonLinearExpression);
 		}
 
-		let n_vars = self.n_vars();
+		self.to_linear_via_dual()
 
-		// Linear normal form: f(x0, x1, ... x{n-1}) = c + a0*x0 + a1*x1 + ... + a{n-1}*x{n-1}
-		// Evaluating with all variables set to 0, should give the constant term
-		let constant = self.evaluate(&vec![F::ZERO; n_vars]);
+		
+		// let n_vars = self.n_vars();
 
-		// Evaluating with x{k} set to 1 and all other x{i} set to 0, gives us `constant + a{k}`
-		// That means we can subtract the constant from the evaluated expression to get the coefficient a{k}
-		let var_coeffs = (0..n_vars)
-			.map(|i| {
-				let mut vars = vec![F::ZERO; n_vars];
-				vars[i] = F::ONE;
-				self.evaluate(&vars) - constant
-			})
-			.collect();
-		Ok(LinearNormalForm {
-			constant,
-			var_coeffs,
-		})
+		// // Linear normal form: f(x0, x1, ... x{n-1}) = c + a0*x0 + a1*x1 + ... + a{n-1}*x{n-1}
+		// // Evaluating with all variables set to 0, should give the constant term
+		// let constant = self.evaluate(&vec![F::ZERO; n_vars]);
+
+		// // Evaluating with x{k} set to 1 and all other x{i} set to 0, gives us `constant + a{k}`
+		// // That means we can subtract the constant from the evaluated expression to get the coefficient a{k}
+		// let var_coeffs = (0..n_vars)
+		// 	.map(|i| {
+		// 		let mut vars = vec![F::ZERO; n_vars];
+		// 		vars[i] = F::ONE;
+		// 		self.evaluate(&vars) - constant
+		// 	})
+		// 	.collect();
+		// Ok(LinearNormalForm {
+		// 	constant,
+		// 	var_coeffs,
+		// })
 	}
 
-	fn evaluate(&self, vars: &[F]) -> F {
-		match self {
-			Self::Const(val) => *val,
-			Self::Var(index) => vars[*index],
-			Self::Add(left, right) => left.evaluate(vars) + right.evaluate(vars),
-			Self::Mul(left, right) => left.evaluate(vars) * right.evaluate(vars),
-			Self::Pow(base, exp) => base.evaluate(vars).pow(*exp),
-		}
-	}
+	// fn evaluate(&self, vars: &[F]) -> F {
+	// 	match self {
+	// 		Self::Const(val) => *val,
+	// 		Self::Var(index) => vars[*index],
+	// 		Self::Add(left, right) => left.evaluate(vars) + right.evaluate(vars),
+	// 		Self::Mul(left, right) => left.evaluate(vars) * right.evaluate(vars),
+	// 		Self::Pow(base, exp) => base.evaluate(vars).pow(*exp),
+	// 	}
+	// }
 
 	   /// Evaluate to a dual‐number, detecting non‐linearity on the fly.
 	pub fn evaluate_dual(&self, vars: &[Dual<F>]) -> Result<Dual<F>, Error> {
@@ -691,6 +698,7 @@ mod tests {
 	fn test_linear_normal_form() {
 		type F = BinaryField128b;
 		use ArithExpr::{Const, Var};
+
 		let expr = Const(F::new(133))
 			+ Const(F::new(42)) * Var(0)
 			+ Var(2) + Const(F::new(11)) * Const(F::new(37)) * Var(3);
@@ -700,5 +708,53 @@ mod tests {
 			normal_form.var_coeffs,
 			vec![F::new(42), F::ZERO, F::ONE, F::new(11) * F::new(37)]
 		);
-	}
+
+		let expr = Const(F::ZERO);
+		let normal_form = expr.linear_normal_form().unwrap();
+        assert_eq!(normal_form.constant, F::ZERO);
+        assert!(normal_form.var_coeffs.is_empty());
+
+		let expr: ArithExpr<F> = Var(2);
+		let normal_form = expr.linear_normal_form().unwrap();
+        assert_eq!(normal_form.constant, F::ZERO);
+        assert_eq!(normal_form.var_coeffs, vec![F::ZERO, F::ZERO, F::ONE]);
+
+		let expr: ArithExpr<F> = Var(0) + Var(3);
+		let normal_form = expr.linear_normal_form().unwrap();
+		assert_eq!(normal_form.constant, F::ZERO);
+		assert_eq!(normal_form.var_coeffs, vec![F::ONE, F::ZERO, F::ZERO, F::ONE]);
+
+		 let expr: ArithExpr<F> = (Var(0) + Const(F::new(5))) * Const(F::new(3));
+		 let normal_form =  expr
+		 .linear_normal_form()
+		 .unwrap();
+	 	 assert_eq!(normal_form.constant, F::new(15));
+	     assert_eq!(normal_form.var_coeffs, vec![F::new(3)]);
+
+		 let expr: ArithExpr<F> = Const(F::new(7))
+                    + Const(F::new(2)) * Var(1)
+                    + Const(F::new(4)) * Var(0);
+		let normal_form = expr.linear_normal_form()
+            .unwrap();
+        assert_eq!(normal_form.constant, F::new(7));
+        assert_eq!(normal_form.var_coeffs, vec![F::new(4), F::new(2)]);
+
+		let expr: ArithExpr<F> = Const(F::new(2)) * (Var(1) + Var(2));
+        let normal_form = expr
+            .linear_normal_form()
+            .unwrap();
+        assert_eq!(normal_form.constant, F::ZERO);
+        assert_eq!(normal_form.var_coeffs, vec![F::ZERO, F::new(2), F::new(2)]);
+
+		let expr: ArithExpr<F> = Var(0) * Var(1);
+		let result_err = expr.linear_normal_form();
+        assert!(matches!(result_err, Err(Error::NonLinearExpression)));
+
+        let expr: ArithExpr<F> = (Var(0) + Const(F::ONE)).pow(2);
+        let result_err = expr.linear_normal_form();
+        assert!(matches!(result_err, Err(Error::NonLinearExpression)));
+    }
+
+
 }
+
