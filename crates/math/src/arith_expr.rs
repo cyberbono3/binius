@@ -5,12 +5,90 @@ use std::{
 	fmt::{self, Display},
 	iter::{Product, Sum},
 	ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+
 };
 
 use binius_field::{Field, PackedField, TowerField};
 use binius_macros::{DeserializeBytes, SerializeBytes};
 
 use super::error::Error;
+
+
+/// A tiny “dual” number carrying
+///  - `real`: the function value
+///  - `derivs`: the length‑n vector of partials ∂f/∂xᵢ
+#[derive(Clone, Debug)]
+pub struct Dual<F: Field> {
+    pub real:   F,
+    pub derivs: Vec<F>,
+}
+
+impl<F: Field> Dual<F> {
+    /// constant c ⇒ (real=c, derivs=0⃗)
+    pub fn constant(c: F, n: usize) -> Self {
+        Self { real: c, derivs: vec![F::ZERO; n] }
+    }
+    /// variable xᵢ ⇒ (real=0, derivs=eᵢ)
+    pub fn variable(i: usize, n: usize) -> Self {
+        let mut d = vec![F::ZERO; n];
+        d[i] = F::ONE;
+        Self { real: F::ZERO, derivs: d }
+    }
+
+    /// exponentiate by a non‑negative integer,
+    /// error if exp>1 and there’s any derivative
+    pub fn pow_uint(self, exp: usize) -> Result<Self, Error> {
+        match exp {
+            0 => Ok(Self::constant(F::ONE, self.derivs.len())),
+            1 => Ok(self),
+            _ => {
+                // base must be constant to stay linear
+                if self.derivs.iter().all(|&d| d == F::ZERO) {
+                    Ok(Self {
+                        real:   self.real.pow(exp as u64),
+                        derivs: vec![F::ZERO; self.derivs.len()],
+                    })
+                } else {
+                    Err(Error::NonLinearExpression)
+                }
+            }
+        }
+    }
+
+    /// multiply, error if both sides carry a derivative
+    pub fn checked_mul(self, rhs: Self) -> Result<Self, Error> {
+        let n = self.derivs.len();
+        let left_const  = self.derivs.iter().all(|&d| d == F::ZERO);
+        let right_const = rhs.derivs.iter().all(|&d| d == F::ZERO);
+
+        let real = self.real * rhs.real;
+        let derivs = match (left_const, right_const) {
+            (true, true)   => vec![F::ZERO; n],
+            (true, false)  => rhs.derivs.iter().map(|&d| self.real * d).collect(),
+            (false, true)  => self.derivs.iter().map(|&d| d * rhs.real).collect(),
+            (false, false) => return Err(Error::NonLinearExpression),
+        };
+
+        Ok(Self { real, derivs })
+    }
+}
+
+// We can still use standard `+` for addition:
+impl<F: Field> Add for Dual<F> {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        let derivs = self.derivs
+            .into_iter()
+            .zip(other.derivs)
+            .map(|(a,b)| a + b)
+            .collect();
+        Self {
+            real:   self.real + other.real,
+            derivs,
+        }
+    }
+}
+
 
 /// Arithmetic expressions that can be evaluated symbolically.
 ///
@@ -330,6 +408,43 @@ impl<F: Field> ArithExpr<F> {
 		}
 	}
 
+	   /// Evaluate to a dual‐number, detecting non‐linearity on the fly.
+	pub fn evaluate_dual(&self, vars: &[Dual<F>]) -> Result<Dual<F>, Error> {
+        match self {
+            Self::Const(c)    => Ok(Dual::constant(*c, vars.len())),
+            Self::Var(i)      => Ok(vars[*i].clone()),
+            Self::Add(l, r)   => {
+                let left = l.evaluate_dual(vars)?;
+                let right = r.evaluate_dual(vars)?;
+                Ok(left + right)
+            }
+            Self::Mul(l, r)   => {
+                let left = l.evaluate_dual(vars)?;
+                let right = r.evaluate_dual(vars)?;
+                left.checked_mul(right)
+            }
+            Self::Pow(b, exp) => {
+                let b = b.evaluate_dual(vars)?;
+                b.pow_uint(*exp as usize)
+            }
+        }
+    }
+
+	 /// A convenience: build the dual inputs and extract a linear normal form
+	 pub fn to_linear_via_dual(&self) -> Result<LinearNormalForm<F>, Error> {
+        let n = self.n_vars();
+        // xi ↦ Dual::variable(i,n)
+        let inputs: Vec<Dual<F>> = (0..n)
+            .map(|i| Dual::variable(i, n))
+            .collect();
+
+        let out = self.evaluate_dual(&inputs)?;
+        Ok(LinearNormalForm {
+            constant: out.real,
+            var_coeffs: out.derivs,
+        })
+    }
+
 	/// Returns a vector of booleans indicating which variables are used in the expression.
 	///
 	/// The vector is indexed by variable index, and the value at index `i` is `true` if and only
@@ -351,7 +466,13 @@ impl<F: Field> ArithExpr<F> {
 			Self::Pow(base, _) => base.mark_vars_usage(usage),
 		}
 	}
+
+
+
 }
+
+
+
 
 impl<F: TowerField> ArithExpr<F> {
 	pub fn binary_tower_level(&self) -> usize {
