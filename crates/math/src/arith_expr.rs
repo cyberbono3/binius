@@ -93,6 +93,24 @@ impl<F: Field> Add for Dual<F> {
     }
 }
 
+impl<F: Field> From<F> for Dual<F> {
+	fn from(value: F) -> Self {
+		Self {
+			real: value,
+			derivs: Vec::new(),
+		}
+	}
+}
+
+impl<F: Field> From<Dual<F>> for LinearNormalForm<F> {
+	fn from(value: Dual<F>) -> Self {
+		Self {
+			constant: value.real,
+			var_coeffs: value.derivs,
+		}
+	}
+}
+
 
 /// Arithmetic expressions that can be evaluated symbolically.
 ///
@@ -371,6 +389,45 @@ impl<F: Field> ArithExpr<F> {
 		}
 	}
 
+	// pub fn linear_normal_form(&self) -> Result<LinearNormalForm<F>, Error> {
+	// 	self.sparse_linear_normal_form().map(Into::into)
+
+
+	// struct SparseLinearNormalForm<F: Field> {
+	// 	/// The constant offset of the expression.
+	// 	pub constant: F,
+	// 	/// A map of variable indices to their coefficients.
+	// 	pub var_coeffs: HashMap<usize, F>,
+	// 	/// The `var_coeffs` vector len if converted to [`LinearNormalForm`].
+	// 	/// It is used for optimization of conversion to [`LinearNormalForm`].
+	// 	pub dense_linear_form_len: usize,
+	// }
+
+	// fn sparse_linear_normal_form(&self) -> Result<SparseLinearNormalForm<F>, Error> {
+	// 	match self {
+	// 		Self::Const(val) => Ok((*val).into()),
+	// 		Self::Var(index) => Ok(SparseLinearNormalForm {
+	// 			constant: F::ZERO,
+	// 			dense_linear_form_len: *index + 1,
+	// 			var_coeffs: [(*index, F::ONE)].into(),
+	// 		}),
+	// 		Self::Add(left, right) => {
+	// 			Ok(left.sparse_linear_normal_form()? + right.sparse_linear_normal_form()?)
+	// 		}
+	// 		Self::Mul(left, right) => {
+	// 			left.sparse_linear_normal_form()? * right.sparse_linear_normal_form()?
+	// 		}
+	// 		Self::Pow(_, 0) => Ok(F::ONE.into()),
+	// 		Self::Pow(expr, 1) => expr.sparse_linear_normal_form(),
+	// 		Self::Pow(expr, pow) => expr.sparse_linear_normal_form().and_then(|linear_form| {
+	// 			if linear_form.dense_linear_form_len != 0 {
+	// 				return Err(Error::NonLinearExpression);
+	// 			}
+	// 			Ok(linear_form.constant.pow(*pow).into())
+	// 		}),
+	// 	}
+	// }
+
 	/// Returns the normal form of an expression if it is linear.
 	///
 	/// ## Throws
@@ -380,40 +437,26 @@ impl<F: Field> ArithExpr<F> {
 		if self.degree() > 1 {
 			return Err(Error::NonLinearExpression);
 		}
+		self.evaluate()
 
-		self.to_linear_via_dual()
-
-		
-		// let n_vars = self.n_vars();
-
-		// // Linear normal form: f(x0, x1, ... x{n-1}) = c + a0*x0 + a1*x1 + ... + a{n-1}*x{n-1}
-		// // Evaluating with all variables set to 0, should give the constant term
-		// let constant = self.evaluate(&vec![F::ZERO; n_vars]);
-
-		// // Evaluating with x{k} set to 1 and all other x{i} set to 0, gives us `constant + a{k}`
-		// // That means we can subtract the constant from the evaluated expression to get the coefficient a{k}
-		// let var_coeffs = (0..n_vars)
-		// 	.map(|i| {
-		// 		let mut vars = vec![F::ZERO; n_vars];
-		// 		vars[i] = F::ONE;
-		// 		self.evaluate(&vars) - constant
-		// 	})
-		// 	.collect();
-		// Ok(LinearNormalForm {
-		// 	constant,
-		// 	var_coeffs,
-		// })
 	}
 
-	// fn evaluate(&self, vars: &[F]) -> F {
-	// 	match self {
-	// 		Self::Const(val) => *val,
-	// 		Self::Var(index) => vars[*index],
-	// 		Self::Add(left, right) => left.evaluate(vars) + right.evaluate(vars),
-	// 		Self::Mul(left, right) => left.evaluate(vars) * right.evaluate(vars),
-	// 		Self::Pow(base, exp) => base.evaluate(vars).pow(*exp),
-	// 	}
-	// }
+	// TODO impl from trait 
+	fn evaluate(&self) -> Result<LinearNormalForm<F>, Error> {
+		match self {
+			Self::Const(val) => Ok(LinearNormalForm::new(*val)),
+			Self::Var(index) => {
+				let mut var_coeffs = vec![F::ZERO; self.n_vars()];
+				var_coeffs[*index] = F::ONE;
+				Ok(LinearNormalForm { constant: F::ZERO, var_coeffs})
+			},
+			Self::Add(left, right) => Ok(left.evaluate()? + right.evaluate()?),
+			Self::Mul(left, right) => {
+				left.evaluate()? * right.evaluate()?
+			},
+			Self::Pow(base, exp) => base.evaluate()?.pow(*exp as usize),
+		}
+	}
 
 	   /// Evaluate to a dual‐number, detecting non‐linearity on the fly.
 	pub fn evaluate_dual(&self, vars: &[Dual<F>]) -> Result<Dual<F>, Error> {
@@ -477,8 +520,6 @@ impl<F: Field> ArithExpr<F> {
 
 
 }
-
-
 
 
 impl<F: TowerField> ArithExpr<F> {
@@ -582,6 +623,82 @@ pub struct LinearNormalForm<F: Field> {
 	pub constant: F,
 	/// A vector mapping variable indices to their coefficients.
 	pub var_coeffs: Vec<F>,
+}
+
+impl<F: Field> LinearNormalForm<F>{
+	pub fn new(value: F) -> Self {
+		Self {
+			constant: value,
+			var_coeffs: Vec::new(),
+		}
+	}
+
+	pub fn constant(constant: F, n: usize) -> Self {
+        Self { 
+			constant,
+			var_coeffs: vec![F::ZERO; n] 
+		}
+    }
+
+	pub fn coeffs_constant(&self) -> bool {
+		self.var_coeffs.iter().all(|&d| d == F::ZERO)
+	}
+
+	pub fn pow(self, exp: usize) -> Result<Self, Error> {
+        match exp {
+            0 => Ok(Self::constant(F::ONE, self.var_coeffs.len())),
+            1 => Ok(self),
+            _ => {
+                // base must be constant to stay linear
+                if self.coeffs_constant() {
+                    Ok(Self {
+                        constant:   self.constant.pow(exp as u64),
+                        var_coeffs: vec![F::ZERO; self.var_coeffs.len()],
+                    })
+                } else {
+                    Err(Error::NonLinearExpression)
+                }
+            }
+        }
+    }
+}
+
+// We can still use standard `+` for addition:
+impl<F: Field> Add for LinearNormalForm<F> {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+		let constant = self.constant + other.constant;
+		// TODO speed it up 
+        let var_coeffs = self.var_coeffs
+            .into_iter()
+            .zip(other.var_coeffs)
+            .map(|(a,b)| a + b)
+            .collect();
+        Self {
+            constant,
+            var_coeffs,
+        }
+    }
+}
+
+   
+impl<F: Field> Mul for LinearNormalForm<F> {
+	type Output = Result<Self, Error>;
+	fn mul(self, other: Self) -> Self::Output {
+		let n = self.var_coeffs.len();
+		let left_const  = self.coeffs_constant();
+		let right_const = other.coeffs_constant();
+	
+		let constant = self.constant * other.constant;
+		let var_coeffs = match (left_const, right_const) {
+				(true, true)   => vec![F::ZERO; n],
+				(true, false)  => other.var_coeffs.iter().map(|&d| self.constant * d).collect(),
+				(false, true)  => self.var_coeffs.iter().map(|&d| d * other.constant).collect(),
+				(false, false) => return Err(Error::NonLinearExpression),
+			};
+	
+		Ok(Self { constant, var_coeffs })
+	}
 }
 
 #[cfg(test)]
